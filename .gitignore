@@ -1,0 +1,23 @@
+# Unreal Engine
+Saved/
+Intermediate/
+DerivedDataCache/
+.vs/
+*.sln
+*.VC.db
+*.opensdf
+*.opendb
+*.log
+*.user
+*.sdf
+*.ipch/
+Binaries/
+Build/
+
+# VSCode
+.vscode/
+*.code-workspace
+
+# OS
+.DS_Store
+Thumbs.db
