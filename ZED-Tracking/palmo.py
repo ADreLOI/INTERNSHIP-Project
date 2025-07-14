@@ -17,7 +17,7 @@ if status != sl.ERROR_CODE.SUCCESS:
 # Create objects to hold images
 time_stamp = sl.Timestamp()
 image_zed = sl.Mat()
-depth = sl.Mat()
+point_cloud = sl.Mat()
 
 # Setup MediaPipe Hands
 mp_hands = mp.solutions.hands
@@ -31,13 +31,13 @@ print("Running hand tracking with ZED... Press 'q' to quit.")
 
 while True:
     if zed.grab(runtime_params) == sl.ERROR_CODE.SUCCESS:
-        # Retrieve image and depth
+        # Retrieve image and 3D point cloud
         zed.retrieve_image(image_zed, sl.VIEW.LEFT)
-        zed.retrieve_measure(depth, sl.MEASURE.DEPTH)
+        zed.retrieve_measure(point_cloud, sl.MEASURE.XYZ)
 
         # Convert to OpenCV format
-        frame_rgba = image_zed.get_data()  # RGBA
-        frame = cv2.cvtColor(frame_rgba, cv2.COLOR_RGBA2BGR)  # Converti in BGR
+        frame_rgba = image_zed.get_data()  # BGRA
+        frame = cv2.cvtColor(frame_rgba, cv2.COLOR_RGB2BGR)  # Convert to BGR
 
         # MediaPipe detection
         results = hands.process(frame)
@@ -51,10 +51,13 @@ while True:
                 h, w, _ = frame.shape
                 cx, cy = int(palm.x * w), int(palm.y * h)
 
-                # Retrieve depth from ZED
-                z_val = depth.get_value(cx, cy)[1]
+                # Retrieve 3D coordinates from ZED
+                point3d = point_cloud.get_value(cx, cy)[1]
+                x_val, y_val, z_val = point3d[0], point3d[1], point3d[2]
 
-                print(f"Palm 3D Position: X={palm.x:.3f}, Y={palm.y:.3f}, Z={z_val:.3f} m")
+                print(
+                    f"Palm 3D Position: X={x_val:.3f}, Y={y_val:.3f}, Z={z_val:.3f} m"
+                )
 
                 # Optionally draw a circle on the palm
                 cv2.circle(frame, (cx, cy), 5, (0, 255, 0), -1)
