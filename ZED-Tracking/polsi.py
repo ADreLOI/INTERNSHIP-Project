@@ -73,19 +73,28 @@ while True:
                 angle = np.degrees(np.arccos(np.clip(abs(normal[1]), -1.0, 1.0)))
                 orientation = "orizzontale" if angle < 45 else "verticale"
 
-                cv2.putText(frame,
-                            f"{label}: {orientation}",
-                            (cx, cy),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.5, (0, 255, 0), 1)
+                angle = np.degrees(
+                    np.arccos(np.clip(abs(normal[1]), -1.0, 1.0))
+                )
+                orientation_label = "orizzontale" if angle < 45 else "verticale"
+
+                cv2.putText(
+                    frame,
+                    f"{label}: {orientation_label}",
+                    (cx, cy),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 255, 0),
+                    1,
+                )
 
                 message[label] = {
                     "position": {
                         "x": float(wrist_pt[0]),
                         "y": float(wrist_pt[1]),
-                        "z": float(wrist_pt[2])
+                        "z": float(wrist_pt[2]),
                     },
-                    "orientation": orientation
+                    "angle": float(angle),
                 }
                 return wrist_pt
 

@@ -16,7 +16,7 @@ struct FWristData
     FVector Position = FVector::ZeroVector;
 
     UPROPERTY(BlueprintReadOnly, Category="Wrist")
-    FString Orientation;
+    float Angle = 0.0f;
 };
 
 UCLASS()
@@ -45,4 +45,5 @@ private:
     FSocket* Socket;
     int32 Port = 5005;
     TSharedPtr<FInternetAddr> RemoteAddr;
+    
 };
