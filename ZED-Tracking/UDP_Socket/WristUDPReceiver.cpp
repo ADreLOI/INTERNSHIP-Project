@@ -1,6 +1,6 @@
 #include "WristUDPReceiver.h"
 #include "SocketSubsystem.h"
-#include "UdpSocketBuilder.h"
+#include "Common/UdpSocketBuilder.h"
 #include "HAL/RunnableThread.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
