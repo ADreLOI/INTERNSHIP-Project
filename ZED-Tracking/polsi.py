@@ -6,7 +6,7 @@ import socket
 import json
 
 # ——— UDP setup —————————————————————————————
-UDP_IP = "127.0.0.1"
+UDP_IP = "10.196.91.47"
 UDP_PORT = 5005
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -80,11 +80,11 @@ while True:
 
                 cv2.putText(
                     frame,
-                    f"{label}: {orientation_label}",
+                    f"{orientation_label}: {angle}",
                     (cx, cy),
-                    cv2.FONT_HERSHEY_SIMPLEX,
+                    cv2.FONT_HERSHEY_DUPLEX,
                     0.5,
-                    (0, 255, 0),
+                    (0, 0, 255),
                     1,
                 )
 
