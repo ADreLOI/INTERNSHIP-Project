@@ -9,9 +9,15 @@ import argparse
 import json
 import os
 import socket
+import time
+import csv
 import cv2
 import mediapipe as mp
 import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use("TkAgg")
+import matplotlib.pyplot as plt
 import pyzed.sl as sl
 
 # --- Configurazione UDP -----------------------------------------------------
@@ -75,6 +81,69 @@ def clamp_point(x: float, y: float, w: int, h: int) -> tuple[int, int]:
     return px, py
 
 
+def compute_orientation(
+    wrist_pt: np.ndarray, index_pt: np.ndarray, pinky_pt: np.ndarray
+) -> tuple[float, float, float]:
+    """Calcola pitch, yaw e roll del piano della mano."""
+
+    x_axis = index_pt - wrist_pt
+    y_axis = pinky_pt - wrist_pt
+    if np.linalg.norm(x_axis) == 0 or np.linalg.norm(y_axis) == 0:
+        return 0.0, 0.0, 0.0
+    x_axis = x_axis / np.linalg.norm(x_axis)
+    y_axis = y_axis / np.linalg.norm(y_axis)
+    z_axis = np.cross(x_axis, y_axis)
+    if np.linalg.norm(z_axis) == 0:
+        return 0.0, 0.0, 0.0
+    z_axis = z_axis / np.linalg.norm(z_axis)
+    y_axis = np.cross(z_axis, x_axis)
+
+    R = np.column_stack((x_axis, y_axis, z_axis))
+    sy = np.sqrt(R[0, 0] ** 2 + R[1, 0] ** 2)
+    singular = sy < 1e-6
+    if not singular:
+        roll = np.degrees(np.arctan2(R[2, 1], R[2, 2]))
+        pitch = np.degrees(np.arctan2(-R[2, 0], sy))
+        yaw = np.degrees(np.arctan2(R[1, 0], R[0, 0]))
+    else:
+        roll = np.degrees(np.arctan2(-R[1, 2], R[1, 1]))
+        pitch = np.degrees(np.arctan2(-R[2, 0], sy))
+        yaw = 0.0
+    return pitch, yaw, roll
+
+
+def plot_results(csv_path: str) -> None:
+    """Legge il CSV e mostra grafici di posizione e rotazione."""
+
+    df = pd.read_csv(csv_path)
+
+    plt.figure()
+    plt.plot(df["timestamp"], df["left_x"], label="left_x")
+    plt.plot(df["timestamp"], df["left_y"], label="left_y")
+    plt.plot(df["timestamp"], df["left_z"], label="left_z")
+    plt.plot(df["timestamp"], df["right_x"], label="right_x")
+    plt.plot(df["timestamp"], df["right_y"], label="right_y")
+    plt.plot(df["timestamp"], df["right_z"], label="right_z")
+    plt.xlabel("Time (s)")
+    plt.ylabel("Position")
+    plt.legend()
+    plt.title("Traiettoria polsi")
+
+    plt.figure()
+    plt.plot(df["timestamp"], df["left_pitch"], label="left_pitch")
+    plt.plot(df["timestamp"], df["left_yaw"], label="left_yaw")
+    plt.plot(df["timestamp"], df["left_roll"], label="left_roll")
+    plt.plot(df["timestamp"], df["right_pitch"], label="right_pitch")
+    plt.plot(df["timestamp"], df["right_yaw"], label="right_yaw")
+    plt.plot(df["timestamp"], df["right_roll"], label="right_roll")
+    plt.xlabel("Time (s)")
+    plt.ylabel("Degrees")
+    plt.legend()
+    plt.title("Rotazioni polsi")
+
+    plt.show()
+
+
 def process_wrist(
     landmarks,
     wrist_id: int,
@@ -102,22 +171,11 @@ def process_wrist(
     ex, ey = clamp_point(pinky.x, pinky.y, w, h)
     pinky_pt = np.array(point_cloud.get_value(ex, ey)[1])[:3]
 
-    # Calcolo del vettore normale al piano formato dalle dita
-    v1 = index_pt - wrist_pt
-    v2 = pinky_pt - wrist_pt
-    normal = np.cross(v1, v2)
-    norm = np.linalg.norm(normal)
-    if norm != 0:
-        normal = normal / norm
+    pitch, yaw, roll = compute_orientation(wrist_pt, index_pt, pinky_pt)
 
-    # L'angolo rispetto all'asse Y indica se il polso è orizzontale o verticale
-    angle = float(np.degrees(np.arccos(np.clip(abs(normal[1]), -1.0, 1.0))))
-    orientation_label = "orizzontale" if angle < 45 else "verticale"
-
-    # Disegniamo sull'immagine l'orientamento rilevato
     cv2.putText(
         frame,
-        f"{orientation_label}: {angle:.2f}",
+        f"p:{pitch:.1f} y:{yaw:.1f} r:{roll:.1f}",
         (cx, cy),
         cv2.FONT_HERSHEY_DUPLEX,
         0.5,
@@ -125,16 +183,19 @@ def process_wrist(
         1,
     )
 
-    # Prepariamo il messaggio JSON con posizione e angolo del polso
     message[label] = {
         "position": {
             "x": float(wrist_pt[0]),
             "y": float(wrist_pt[1]),
             "z": float(wrist_pt[2]),
         },
-        "angle": angle,
+        "rotation": {
+            "pitch": pitch,
+            "yaw": yaw,
+            "roll": roll,
+        },
     }
-    return wrist_pt
+    return wrist_pt, (pitch, yaw, roll)
 
 
 def main() -> None:
@@ -155,12 +216,11 @@ def main() -> None:
     args = parser.parse_args()
 
     # Valori di default se non specificati da linea di comando o input
-    ip = os.getenv("UDP_IP", "10.196.91.47")
+    ip = os.getenv("UDP_IP", "10.196.180.144")
     port = int(os.getenv("UDP_PORT", "5005"))
 
     # Se non passati come argomenti, chiediamoli all'utente
     if args.ip is None:
-        # Richiediamo all'utente l'IP (invio per mantenere il default)
         ip_input = input(f"Inserisci l'IP di destinazione [{ip}]: ").strip()
         if ip_input:
             ip = ip_input
@@ -168,7 +228,6 @@ def main() -> None:
         ip = args.ip
 
     if args.port is None:
-        # Analogamente chiediamo la porta
         port_input = input(f"Inserisci la porta di destinazione [{port}]: ").strip()
         if port_input:
             port = int(port_input)
@@ -180,35 +239,56 @@ def main() -> None:
     zed, image_zed, point_cloud, runtime_params = setup_zed()
     mp_pose, mp_drawing, pose = setup_pose()
 
-    # Messaggio di avvio
+    csv_path = "wrist_body.csv"
+    new_csv = not os.path.exists(csv_path)
+    csv_file = open(csv_path, "a", newline="")
+    writer = csv.writer(csv_file)
+    if new_csv:
+        writer.writerow(
+            [
+                "timestamp",
+                "left_x",
+                "left_y",
+                "left_z",
+                "left_pitch",
+                "left_yaw",
+                "left_roll",
+                "right_x",
+                "right_y",
+                "right_z",
+                "right_pitch",
+                "right_yaw",
+                "right_roll",
+            ]
+        )
+
     print("Running wrist orientation tracking... Press 'q' to quit.")
 
     try:
-        # Ciclo principale di acquisizione e processamento
         while True:
             if zed.grab(runtime_params) == sl.ERROR_CODE.SUCCESS:
                 zed.retrieve_image(image_zed, sl.VIEW.LEFT)
                 zed.retrieve_measure(point_cloud, sl.MEASURE.XYZ)
 
-                # Otteniamo il frame corrente e lo convertiamo in RGB
                 frame_rgba = image_zed.get_data()
                 frame = cv2.cvtColor(frame_rgba, cv2.COLOR_RGBA2RGB)
 
-                # Elaborazione Pose e struttura del messaggio da inviare
+                ts = time.time()
                 results = pose.process(frame)
-                message = {"left_wrist": None, "right_wrist": None}
+                message = {
+                    "timestamp": ts,
+                    "left_wrist": None,
+                    "right_wrist": None,
+                }
 
                 if results.pose_landmarks:
-                    # Disegniamo i landmarks rilevati
                     mp_drawing.draw_landmarks(
                         frame, results.pose_landmarks, mp_pose.POSE_CONNECTIONS
                     )
-                    # Lista completa dei punti rilevati
                     landmarks = results.pose_landmarks.landmark
                     h, w, _ = frame.shape
 
-                    # Calcoliamo posizione e orientamento del polso sinistro
-                    left_pt = process_wrist(
+                    left_pt, left_rot = process_wrist(
                         landmarks,
                         mp_pose.PoseLandmark.LEFT_WRIST.value,
                         mp_pose.PoseLandmark.LEFT_PINKY.value,
@@ -221,8 +301,7 @@ def main() -> None:
                         message,
                     )
 
-                    # Idem per il polso destro
-                    right_pt = process_wrist(
+                    right_pt, right_rot = process_wrist(
                         landmarks,
                         mp_pose.PoseLandmark.RIGHT_WRIST.value,
                         mp_pose.PoseLandmark.RIGHT_PINKY.value,
@@ -257,20 +336,29 @@ def main() -> None:
                             1,
                         )
 
-                # Inviamo il messaggio via UDP
+                writer.writerow(
+                    [
+                        ts,
+                        *(left_pt if left_pt is not None else (np.nan, np.nan, np.nan)),
+                        *(left_rot if left_pt is not None else (np.nan, np.nan, np.nan)),
+                        *(right_pt if right_pt is not None else (np.nan, np.nan, np.nan)),
+                        *(right_rot if right_pt is not None else (np.nan, np.nan, np.nan)),
+                    ]
+                )
+
                 sock.sendto(json.dumps(message).encode("utf-8"), (ip, port))
 
                 cv2.imshow("ZED Wrist Orientation", frame)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
     finally:
-        # Chiusura ordinata di tutte le risorse
         cv2.destroyAllWindows()
         pose.close()
         zed.close()
         sock.close()
+        csv_file.close()
+        plot_results(csv_path)
 
 
-# Avviamo lo script solo se eseguito direttamente
 if __name__ == "__main__":
     main()

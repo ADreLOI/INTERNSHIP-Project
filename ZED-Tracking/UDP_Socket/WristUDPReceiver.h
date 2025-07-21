@@ -16,7 +16,7 @@ struct FWristData
     FVector Position = FVector::ZeroVector;
 
     UPROPERTY(BlueprintReadOnly, Category="Wrist")
-    float Angle = 0.0f;
+    FRotator Rotation = FRotator::ZeroRotator;
 };
 
 UCLASS()

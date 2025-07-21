@@ -10,12 +10,17 @@ import argparse
 import json
 import os
 import socket
+import time
+import csv
 
 import cv2
 import mediapipe as mp
 import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use("TkAgg")
+import matplotlib.pyplot as plt
 import pyzed.sl as sl
-
 
 # --- Configurazione UDP -----------------------------------------------------
 def setup_udp(ip: str, port: int) -> socket.socket:
@@ -70,6 +75,69 @@ def clamp_point(x: float, y: float, w: int, h: int) -> tuple[int, int]:
     return px, py
 
 
+def compute_orientation(
+    wrist_pt: np.ndarray, index_pt: np.ndarray, pinky_pt: np.ndarray
+) -> tuple[float, float, float]:
+    """Calcola pitch, yaw e roll della mano."""
+
+    x_axis = index_pt - wrist_pt
+    y_axis = pinky_pt - wrist_pt
+    if np.linalg.norm(x_axis) == 0 or np.linalg.norm(y_axis) == 0:
+        return 0.0, 0.0, 0.0
+    x_axis = x_axis / np.linalg.norm(x_axis)
+    y_axis = y_axis / np.linalg.norm(y_axis)
+    z_axis = np.cross(x_axis, y_axis)
+    if np.linalg.norm(z_axis) == 0:
+        return 0.0, 0.0, 0.0
+    z_axis = z_axis / np.linalg.norm(z_axis)
+    y_axis = np.cross(z_axis, x_axis)
+
+    R = np.column_stack((x_axis, y_axis, z_axis))
+    sy = np.sqrt(R[0, 0] ** 2 + R[1, 0] ** 2)
+    singular = sy < 1e-6
+    if not singular:
+        roll = np.degrees(np.arctan2(R[2, 1], R[2, 2]))
+        pitch = np.degrees(np.arctan2(-R[2, 0], sy))
+        yaw = np.degrees(np.arctan2(R[1, 0], R[0, 0]))
+    else:
+        roll = np.degrees(np.arctan2(-R[1, 2], R[1, 1]))
+        pitch = np.degrees(np.arctan2(-R[2, 0], sy))
+        yaw = 0.0
+    return pitch, yaw, roll
+
+
+def plot_results(csv_path: str) -> None:
+    """Legge il CSV e genera grafici delle posizioni e rotazioni."""
+
+    df = pd.read_csv(csv_path)
+
+    plt.figure()
+    plt.plot(df["timestamp"], df["left_x"], label="left_x")
+    plt.plot(df["timestamp"], df["left_y"], label="left_y")
+    plt.plot(df["timestamp"], df["left_z"], label="left_z")
+    plt.plot(df["timestamp"], df["right_x"], label="right_x")
+    plt.plot(df["timestamp"], df["right_y"], label="right_y")
+    plt.plot(df["timestamp"], df["right_z"], label="right_z")
+    plt.xlabel("Time (s)")
+    plt.ylabel("Position")
+    plt.legend()
+    plt.title("Traiettoria polsi")
+
+    plt.figure()
+    plt.plot(df["timestamp"], df["left_pitch"], label="left_pitch")
+    plt.plot(df["timestamp"], df["left_yaw"], label="left_yaw")
+    plt.plot(df["timestamp"], df["left_roll"], label="left_roll")
+    plt.plot(df["timestamp"], df["right_pitch"], label="right_pitch")
+    plt.plot(df["timestamp"], df["right_yaw"], label="right_yaw")
+    plt.plot(df["timestamp"], df["right_roll"], label="right_roll")
+    plt.xlabel("Time (s)")
+    plt.ylabel("Degrees")
+    plt.legend()
+    plt.title("Rotazioni polsi")
+
+    plt.show()
+
+
 def process_hand(
     landmarks,
     wrist_id: int,
@@ -97,19 +165,11 @@ def process_hand(
     px, py = clamp_point(pinky.x, pinky.y, w, h)
     pinky_pt = np.array(point_cloud.get_value(px, py)[1])[:3]
 
-    v1 = index_pt - wrist_pt
-    v2 = pinky_pt - wrist_pt
-    normal = np.cross(v1, v2)
-    norm = np.linalg.norm(normal)
-    if norm != 0:
-        normal = normal / norm
-
-    angle = float(np.degrees(np.arccos(np.clip(abs(normal[1]), -1.0, 1.0))))
-    orientation_label = "orizzontale" if angle < 45 else "verticale"
+    pitch, yaw, roll = compute_orientation(wrist_pt, index_pt, pinky_pt)
 
     cv2.putText(
         frame,
-        f"{orientation_label}: {angle:.2f}",
+        f"p:{pitch:.1f} y:{yaw:.1f} r:{roll:.1f}",
         (cx, cy),
         cv2.FONT_HERSHEY_DUPLEX,
         0.5,
@@ -123,17 +183,21 @@ def process_hand(
             "y": float(wrist_pt[1]),
             "z": float(wrist_pt[2]),
         },
-        "angle": angle,
+        "rotation": {
+            "pitch": pitch,
+            "yaw": yaw,
+            "roll": roll,
+        },
     }
 
-    return wrist_pt
+    return wrist_pt, (pitch, yaw, roll)
 
 
 def main() -> None:
     """Funzione principale dello script."""
 
     parser = argparse.ArgumentParser(
-        description="ZED hand orientation tracker"
+        description="ZED hand orientation tracker",
     )
     parser.add_argument(
         "--ip",
@@ -148,7 +212,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    ip = os.getenv("UDP_IP", "10.196.91.47")
+    ip = os.getenv("UDP_IP", "10.196.180.144")
     port = int(os.getenv("UDP_PORT", "5005"))
 
     if args.ip is None:
@@ -169,6 +233,29 @@ def main() -> None:
     zed, image_zed, point_cloud, runtime_params = setup_zed()
     mp_hands, mp_drawing, hands = setup_hands()
 
+    csv_path = "wrist_hands.csv"
+    new_csv = not os.path.exists(csv_path)
+    csv_file = open(csv_path, "a", newline="")
+    writer = csv.writer(csv_file)
+    if new_csv:
+        writer.writerow(
+            [
+                "timestamp",
+                "left_x",
+                "left_y",
+                "left_z",
+                "left_pitch",
+                "left_yaw",
+                "left_roll",
+                "right_x",
+                "right_y",
+                "right_z",
+                "right_pitch",
+                "right_yaw",
+                "right_roll",
+            ]
+        )
+
     print("Running hand orientation tracking... Press 'q' to quit.")
 
     try:
@@ -180,8 +267,16 @@ def main() -> None:
                 frame_rgba = image_zed.get_data()
                 frame = cv2.cvtColor(frame_rgba, cv2.COLOR_RGBA2RGB)
 
+                ts = time.time()
                 results = hands.process(frame)
-                message = {"left_wrist": None, "right_wrist": None}
+                message = {
+                    "timestamp": ts,
+                    "left_wrist": None,
+                    "right_wrist": None,
+                }
+
+                left_pt = right_pt = None
+                left_rot = right_rot = (np.nan, np.nan, np.nan)
 
                 if results.multi_hand_landmarks and results.multi_handedness:
                     for hand_landmarks, hand_handedness in zip(
@@ -198,7 +293,7 @@ def main() -> None:
                         landmarks = hand_landmarks.landmark
                         h, w, _ = frame.shape
 
-                        hand_pt = process_hand(
+                        hand_pt, hand_rot = process_hand(
                             landmarks,
                             mp_hands.HandLandmark.WRIST.value,
                             mp_hands.HandLandmark.PINKY_TIP.value,
@@ -222,6 +317,20 @@ def main() -> None:
                                 (255, 0, 0),
                                 1,
                             )
+                            if label == "left":
+                                left_pt, left_rot = hand_pt, hand_rot
+                            else:
+                                right_pt, right_rot = hand_pt, hand_rot
+
+                writer.writerow(
+                    [
+                        ts,
+                        *(left_pt if left_pt is not None else (np.nan, np.nan, np.nan)),
+                        *(left_rot if left_pt is not None else (np.nan, np.nan, np.nan)),
+                        *(right_pt if right_pt is not None else (np.nan, np.nan, np.nan)),
+                        *(right_rot if right_pt is not None else (np.nan, np.nan, np.nan)),
+                    ]
+                )
 
                 sock.sendto(json.dumps(message).encode("utf-8"), (ip, port))
 
@@ -233,6 +342,8 @@ def main() -> None:
         hands.close()
         zed.close()
         sock.close()
+        csv_file.close()
+        plot_results(csv_path)
 
 
 if __name__ == "__main__":

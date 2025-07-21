@@ -67,7 +67,13 @@ bool AWristUDPReceiver::ParseJson(const FString& JsonString)
                 OutData.Position.Y = PosObj->GetNumberField(TEXT("y"));
                 OutData.Position.Z = PosObj->GetNumberField(TEXT("z"));
             }
-            OutData.Angle = WristObj->GetNumberField(TEXT("angle"));
+            TSharedPtr<FJsonObject> RotObj = WristObj->GetObjectField(TEXT("rotation"));
+            if (RotObj.IsValid())
+            {
+                OutData.Rotation.Pitch = RotObj->GetNumberField(TEXT("pitch"));
+                OutData.Rotation.Yaw = RotObj->GetNumberField(TEXT("yaw"));
+                OutData.Rotation.Roll = RotObj->GetNumberField(TEXT("roll"));
+            }
         };
 
         ParseWrist(TEXT("left_wrist"), LeftWrist);
