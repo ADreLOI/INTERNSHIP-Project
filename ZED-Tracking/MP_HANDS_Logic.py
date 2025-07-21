@@ -20,7 +20,19 @@ import pandas as pd
 import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
+import logging
+import warnings
+import threading
 import pyzed.sl as sl
+
+logging.basicConfig(level=logging.INFO)
+
+
+def _showwarning(message, category, filename, lineno, file=None, line=None):
+    logging.warning(f"{category.__name__}: {message}")
+
+
+warnings.showwarning = _showwarning
 
 # --- Configurazione UDP -----------------------------------------------------
 def setup_udp(ip: str, port: int) -> socket.socket:
@@ -106,6 +118,67 @@ def compute_orientation(
     return pitch, yaw, roll
 
 
+def init_plots():
+    """Inizializza le figure interattive."""
+
+    plt.ion()
+
+    fig_pos, ax_pos = plt.subplots()
+    fig_pos.canvas.manager.set_window_title("Posizione")
+    ax_pos.set_xlabel("Frame")
+    ax_pos.set_ylabel("mm")
+    ax_pos.set_title("Posizione")
+    lp_x, = ax_pos.plot([], [], label="X")
+    lp_y, = ax_pos.plot([], [], label="Y")
+    lp_z, = ax_pos.plot([], [], label="Z")
+    ax_pos.legend()
+
+    fig_rot, ax_rot = plt.subplots()
+    fig_rot.canvas.manager.set_window_title("Rotazione")
+    ax_rot.set_xlabel("Frame")
+    ax_rot.set_ylabel("deg")
+    ax_rot.set_title("Rotazione")
+    lr_p, = ax_rot.plot([], [], label="Pitch")
+    lr_y, = ax_rot.plot([], [], label="Yaw")
+    lr_r, = ax_rot.plot([], [], label="Roll")
+    ax_rot.legend()
+
+    return (fig_pos, ax_pos, [lp_x, lp_y, lp_z]), (fig_rot, ax_rot, [lr_p, lr_y, lr_r])
+
+
+def update_plots(time_data, pos_data, rot_data, plots) -> None:
+    """Aggiorna i grafici interattivi."""
+
+    (fig_pos, ax_pos, pos_lines), (fig_rot, ax_rot, rot_lines) = plots
+
+    for line, data in zip(pos_lines, pos_data):
+        line.set_data(time_data, data)
+    ax_pos.relim()
+    ax_pos.autoscale_view()
+
+    for line, data in zip(rot_lines, rot_data):
+        line.set_data(time_data, data)
+    ax_rot.relim()
+    ax_rot.autoscale_view()
+
+    for fig in (fig_pos, fig_rot):
+        fig.canvas.draw()
+        fig.canvas.flush_events()
+
+
+def plot_worker(stop_event, lock, time_vals, pos_vals, rot_vals):
+    """Thread per l'aggiornamento continuo dei grafici."""
+
+    plots = init_plots()
+    while not stop_event.is_set():
+        with lock:
+            t = time_vals.copy()
+            p = [arr.copy() for arr in pos_vals]
+            r = [arr.copy() for arr in rot_vals]
+        update_plots(t, p, r, plots)
+        time.sleep(0.05)
+
+
 def plot_results(csv_path: str) -> None:
     """Legge il CSV e genera grafici delle posizioni e rotazioni."""
 
@@ -143,14 +216,11 @@ def process_hand(
     wrist_id: int,
     pinky_id: int,
     index_id: int,
-    label: str,
     w: int,
     h: int,
     point_cloud: sl.Mat,
-    frame: np.ndarray,
-    message: dict,
 ):
-    """Calcola posizione e orientamento della mano specificata."""
+    """Restituisce posizione 3D e orientamento della mano."""
 
     wrist = landmarks[wrist_id]
     pinky = landmarks[pinky_id]
@@ -165,32 +235,7 @@ def process_hand(
     px, py = clamp_point(pinky.x, pinky.y, w, h)
     pinky_pt = np.array(point_cloud.get_value(px, py)[1])[:3]
 
-    pitch, yaw, roll = compute_orientation(wrist_pt, index_pt, pinky_pt)
-
-    cv2.putText(
-        frame,
-        f"p:{pitch:.1f} y:{yaw:.1f} r:{roll:.1f}",
-        (cx, cy),
-        cv2.FONT_HERSHEY_DUPLEX,
-        0.5,
-        (0, 0, 255),
-        1,
-    )
-
-    message[label] = {
-        "position": {
-            "x": float(wrist_pt[0]),
-            "y": float(wrist_pt[1]),
-            "z": float(wrist_pt[2]),
-        },
-        "rotation": {
-            "pitch": pitch,
-            "yaw": yaw,
-            "roll": roll,
-        },
-    }
-
-    return wrist_pt, (pitch, yaw, roll)
+    return wrist_pt, compute_orientation(wrist_pt, index_pt, pinky_pt), (cx, cy)
 
 
 def main() -> None:
@@ -256,6 +301,18 @@ def main() -> None:
             ]
         )
 
+    time_vals: list[float] = []
+    pos_vals = [[], [], []]
+    rot_vals = [[], [], []]
+    lock = threading.Lock()
+    stop_event = threading.Event()
+    plot_thread = threading.Thread(
+        target=plot_worker, args=(stop_event, lock, time_vals, pos_vals, rot_vals)
+    )
+    plot_thread.start()
+    last_left_rot = [0.0, 0.0, 0.0]
+    last_right_rot = [0.0, 0.0, 0.0]
+
     print("Running hand orientation tracking... Press 'q' to quit.")
 
     try:
@@ -293,17 +350,14 @@ def main() -> None:
                         landmarks = hand_landmarks.landmark
                         h, w, _ = frame.shape
 
-                        hand_pt, hand_rot = process_hand(
+                        hand_pt, raw_rot, (hx, hy) = process_hand(
                             landmarks,
                             mp_hands.HandLandmark.WRIST.value,
                             mp_hands.HandLandmark.PINKY_TIP.value,
                             mp_hands.HandLandmark.INDEX_FINGER_TIP.value,
-                            f"{label}_wrist",
                             w,
                             h,
                             point_cloud,
-                            frame,
-                            message,
                         )
 
                         if hand_pt is not None:
@@ -317,10 +371,52 @@ def main() -> None:
                                 (255, 0, 0),
                                 1,
                             )
+                            rot = []
                             if label == "left":
-                                left_pt, left_rot = hand_pt, hand_rot
+                                target_last = last_left_rot
                             else:
-                                right_pt, right_rot = hand_pt, hand_rot
+                                target_last = last_right_rot
+                            for i, val in enumerate(raw_rot):
+                                if not np.isfinite(val):
+                                    val = target_last[i]
+                                else:
+                                    target_last[i] = val
+                                rot.append(val)
+                            rot = tuple(rot)
+
+                            message[f"{label}_wrist"] = {
+                                "position": {
+                                    "x": float(hand_pt[0]),
+                                    "y": float(hand_pt[1]),
+                                    "z": float(hand_pt[2]),
+                                },
+                                "rotation": {
+                                    "pitch": rot[0],
+                                    "yaw": rot[1],
+                                    "roll": rot[2],
+                                },
+                            }
+
+                            cv2.putText(
+                                frame,
+                                f"p:{rot[0]:.1f} y:{rot[1]:.1f} r:{rot[2]:.1f}",
+                                (hx, hy),
+                                cv2.FONT_HERSHEY_DUPLEX,
+                                0.5,
+                                (0, 0, 255),
+                                1,
+                            )
+
+                            if label == "left":
+                                left_pt, left_rot = hand_pt, rot
+                                with lock:
+                                    time_vals.append(ts)
+                                    for arr, val in zip(pos_vals, hand_pt):
+                                        arr.append(float(val))
+                                    for arr, val in zip(rot_vals, rot):
+                                        arr.append(val)
+                            else:
+                                right_pt, right_rot = hand_pt, rot
 
                 writer.writerow(
                     [
@@ -328,7 +424,7 @@ def main() -> None:
                         *(left_pt if left_pt is not None else (np.nan, np.nan, np.nan)),
                         *(left_rot if left_pt is not None else (np.nan, np.nan, np.nan)),
                         *(right_pt if right_pt is not None else (np.nan, np.nan, np.nan)),
-                        *(right_rot if right_pt is not None else (np.nan, np.nan, np.nan)),
+                        *(right_rot if right_rot is not None else (np.nan, np.nan, np.nan)),
                     ]
                 )
 
@@ -343,7 +439,8 @@ def main() -> None:
         zed.close()
         sock.close()
         csv_file.close()
-        plot_results(csv_path)
+        stop_event.set()
+        plot_thread.join()
 
 
 if __name__ == "__main__":

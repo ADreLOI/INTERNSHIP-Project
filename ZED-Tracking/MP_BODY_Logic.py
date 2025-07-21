@@ -18,7 +18,19 @@ import pandas as pd
 import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
+import logging
+import warnings
+import threading
 import pyzed.sl as sl
+
+logging.basicConfig(level=logging.INFO)
+
+
+def _showwarning(message, category, filename, lineno, file=None, line=None):
+    logging.warning(f"{category.__name__}: {message}")
+
+
+warnings.showwarning = _showwarning
 
 # --- Configurazione UDP -----------------------------------------------------
 def setup_udp(ip: str, port: int) -> socket.socket:
@@ -112,6 +124,67 @@ def compute_orientation(
     return pitch, yaw, roll
 
 
+def init_plots():
+    """Inizializza le figure interattive per posizione e rotazione."""
+
+    plt.ion()
+
+    fig_pos, ax_pos = plt.subplots()
+    fig_pos.canvas.manager.set_window_title("Posizione")
+    ax_pos.set_xlabel("Frame")
+    ax_pos.set_ylabel("mm")
+    ax_pos.set_title("Posizione")
+    lp_x, = ax_pos.plot([], [], label="X")
+    lp_y, = ax_pos.plot([], [], label="Y")
+    lp_z, = ax_pos.plot([], [], label="Z")
+    ax_pos.legend()
+
+    fig_rot, ax_rot = plt.subplots()
+    fig_rot.canvas.manager.set_window_title("Rotazione")
+    ax_rot.set_xlabel("Frame")
+    ax_rot.set_ylabel("deg")
+    ax_rot.set_title("Rotazione")
+    lr_p, = ax_rot.plot([], [], label="Pitch")
+    lr_y, = ax_rot.plot([], [], label="Yaw")
+    lr_r, = ax_rot.plot([], [], label="Roll")
+    ax_rot.legend()
+
+    return (fig_pos, ax_pos, [lp_x, lp_y, lp_z]), (fig_rot, ax_rot, [lr_p, lr_y, lr_r])
+
+
+def update_plots(time_data, pos_data, rot_data, plots) -> None:
+    """Aggiorna le figure con i nuovi valori."""
+
+    (fig_pos, ax_pos, pos_lines), (fig_rot, ax_rot, rot_lines) = plots
+
+    for line, data in zip(pos_lines, pos_data):
+        line.set_data(time_data, data)
+    ax_pos.relim()
+    ax_pos.autoscale_view()
+
+    for line, data in zip(rot_lines, rot_data):
+        line.set_data(time_data, data)
+    ax_rot.relim()
+    ax_rot.autoscale_view()
+
+    for fig in (fig_pos, fig_rot):
+        fig.canvas.draw()
+        fig.canvas.flush_events()
+
+
+def plot_worker(stop_event, lock, time_vals, pos_vals, rot_vals):
+    """Thread dedicato all'aggiornamento dei grafici."""
+
+    plots = init_plots()
+    while not stop_event.is_set():
+        with lock:
+            t = time_vals.copy()
+            p = [arr.copy() for arr in pos_vals]
+            r = [arr.copy() for arr in rot_vals]
+        update_plots(t, p, r, plots)
+        time.sleep(0.05)
+
+
 def plot_results(csv_path: str) -> None:
     """Legge il CSV e mostra grafici di posizione e rotazione."""
 
@@ -149,19 +222,16 @@ def process_wrist(
     wrist_id: int,
     pinky_id: int,
     index_id: int,
-    label: str,
     w: int,
     h: int,
     point_cloud: sl.Mat,
-    frame: np.ndarray,
-    message: dict,
 ):
-    # Estraiamo i landmark necessari
+    """Restituisce posizione 3D e orientamento del polso richiesto."""
+
     wrist = landmarks[wrist_id]
     pinky = landmarks[pinky_id]
     index = landmarks[index_id]
 
-    # Coordinate del polso nel frame e nel cloud di punti
     cx, cy = clamp_point(wrist.x, wrist.y, w, h)
     wrist_pt = np.array(point_cloud.get_value(cx, cy)[1])[:3]
 
@@ -171,31 +241,7 @@ def process_wrist(
     ex, ey = clamp_point(pinky.x, pinky.y, w, h)
     pinky_pt = np.array(point_cloud.get_value(ex, ey)[1])[:3]
 
-    pitch, yaw, roll = compute_orientation(wrist_pt, index_pt, pinky_pt)
-
-    cv2.putText(
-        frame,
-        f"p:{pitch:.1f} y:{yaw:.1f} r:{roll:.1f}",
-        (cx, cy),
-        cv2.FONT_HERSHEY_DUPLEX,
-        0.5,
-        (0, 0, 255),
-        1,
-    )
-
-    message[label] = {
-        "position": {
-            "x": float(wrist_pt[0]),
-            "y": float(wrist_pt[1]),
-            "z": float(wrist_pt[2]),
-        },
-        "rotation": {
-            "pitch": pitch,
-            "yaw": yaw,
-            "roll": roll,
-        },
-    }
-    return wrist_pt, (pitch, yaw, roll)
+    return wrist_pt, compute_orientation(wrist_pt, index_pt, pinky_pt), (cx, cy)
 
 
 def main() -> None:
@@ -262,6 +308,18 @@ def main() -> None:
             ]
         )
 
+    time_vals: list[float] = []
+    pos_vals = [[], [], []]
+    rot_vals = [[], [], []]
+    lock = threading.Lock()
+    stop_event = threading.Event()
+    plot_thread = threading.Thread(
+        target=plot_worker, args=(stop_event, lock, time_vals, pos_vals, rot_vals)
+    )
+    plot_thread.start()
+    last_left_rot = [0.0, 0.0, 0.0]
+    last_right_rot = [0.0, 0.0, 0.0]
+
     print("Running wrist orientation tracking... Press 'q' to quit.")
 
     try:
@@ -288,33 +346,49 @@ def main() -> None:
                     landmarks = results.pose_landmarks.landmark
                     h, w, _ = frame.shape
 
-                    left_pt, left_rot = process_wrist(
+                    left_pt, left_raw_rot, (lcx, lcy) = process_wrist(
                         landmarks,
                         mp_pose.PoseLandmark.LEFT_WRIST.value,
                         mp_pose.PoseLandmark.LEFT_PINKY.value,
                         mp_pose.PoseLandmark.LEFT_INDEX.value,
-                        "left_wrist",
                         w,
                         h,
                         point_cloud,
-                        frame,
-                        message,
                     )
 
-                    right_pt, right_rot = process_wrist(
+                    right_pt, right_raw_rot, (rcx, rcy) = process_wrist(
                         landmarks,
                         mp_pose.PoseLandmark.RIGHT_WRIST.value,
                         mp_pose.PoseLandmark.RIGHT_PINKY.value,
                         mp_pose.PoseLandmark.RIGHT_INDEX.value,
-                        "right_wrist",
                         w,
                         h,
                         point_cloud,
-                        frame,
-                        message,
                     )
 
                     if left_pt is not None:
+                        left_rot = []
+                        for i, val in enumerate(left_raw_rot):
+                            if not np.isfinite(val):
+                                val = last_left_rot[i]
+                            else:
+                                last_left_rot[i] = val
+                            left_rot.append(val)
+                        left_rot = tuple(left_rot)
+
+                        message["left_wrist"] = {
+                            "position": {
+                                "x": float(left_pt[0]),
+                                "y": float(left_pt[1]),
+                                "z": float(left_pt[2]),
+                            },
+                            "rotation": {
+                                "pitch": left_rot[0],
+                                "yaw": left_rot[1],
+                                "roll": left_rot[2],
+                            },
+                        }
+
                         cv2.putText(
                             frame,
                             f"Polso Sinistro: {left_pt[0]:.2f}, {left_pt[1]:.2f}, {left_pt[2]:.2f}",
@@ -324,8 +398,48 @@ def main() -> None:
                             (255, 0, 0),
                             1,
                         )
+                        cv2.putText(
+                            frame,
+                            f"p:{left_rot[0]:.1f} y:{left_rot[1]:.1f} r:{left_rot[2]:.1f}",
+                            (lcx, lcy),
+                            cv2.FONT_HERSHEY_DUPLEX,
+                            0.5,
+                            (0, 0, 255),
+                            1,
+                        )
+
+                        with lock:
+                            time_vals.append(ts)
+                            for arr, val in zip(pos_vals, left_pt):
+                                arr.append(float(val))
+                            for arr, val in zip(rot_vals, left_rot):
+                                arr.append(val)
+                    else:
+                        left_rot = (np.nan, np.nan, np.nan)
 
                     if right_pt is not None:
+                        right_rot = []
+                        for i, val in enumerate(right_raw_rot):
+                            if not np.isfinite(val):
+                                val = last_right_rot[i]
+                            else:
+                                last_right_rot[i] = val
+                            right_rot.append(val)
+                        right_rot = tuple(right_rot)
+
+                        message["right_wrist"] = {
+                            "position": {
+                                "x": float(right_pt[0]),
+                                "y": float(right_pt[1]),
+                                "z": float(right_pt[2]),
+                            },
+                            "rotation": {
+                                "pitch": right_rot[0],
+                                "yaw": right_rot[1],
+                                "roll": right_rot[2],
+                            },
+                        }
+
                         cv2.putText(
                             frame,
                             f"Polso Destro: {right_pt[0]:.2f}, {right_pt[1]:.2f}, {right_pt[2]:.2f}",
@@ -335,6 +449,17 @@ def main() -> None:
                             (255, 0, 0),
                             1,
                         )
+                        cv2.putText(
+                            frame,
+                            f"p:{right_rot[0]:.1f} y:{right_rot[1]:.1f} r:{right_rot[2]:.1f}",
+                            (rcx, rcy),
+                            cv2.FONT_HERSHEY_DUPLEX,
+                            0.5,
+                            (0, 0, 255),
+                            1,
+                        )
+                    else:
+                        right_rot = (np.nan, np.nan, np.nan)
 
                 writer.writerow(
                     [
@@ -357,7 +482,8 @@ def main() -> None:
         zed.close()
         sock.close()
         csv_file.close()
-        plot_results(csv_path)
+        stop_event.set()
+        plot_thread.join()
 
 
 if __name__ == "__main__":
