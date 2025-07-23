@@ -34,7 +34,20 @@ warnings.showwarning = _showwarning
 
 # --- Configurazione UDP -----------------------------------------------------
 def setup_udp(ip: str, port: int) -> socket.socket:
-    """Crea e restituisce un socket UDP pronto per l'invio."""
+    """Crea e restituisce un socket UDP pronto per l'invio.
+
+    Parametri
+    ----------
+    ip: str
+        Indirizzo IP della macchina che riceverà i dati.
+    port: int
+        Porta su cui inviare i pacchetti UDP.
+
+    Ritorna
+    -------
+    socket.socket
+        Socket configurato per l'invio datagram.
+    """
 
     # Creiamo un semplice socket datagram che useremo per inviare i dati
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -43,7 +56,12 @@ def setup_udp(ip: str, port: int) -> socket.socket:
 
 # --- Configurazione della ZED ------------------------------------------------
 def setup_zed():
-    """Inizializza la telecamera ZED e restituisce gli oggetti utili."""
+    """Inizializza la telecamera ZED e restituisce gli oggetti utili.
+
+    Questa funzione prepara la camera ZED con una configurazione di base
+    adatta all'elaborazione in tempo reale. In caso di errore di apertura
+    viene sollevata un'eccezione RuntimeError.
+    """
 
     # Creiamo l'istanza della camera
     zed = sl.Camera()
@@ -67,7 +85,11 @@ def setup_zed():
 
 # --- Configurazione di MediaPipe Pose ---------------------------------------
 def setup_pose():
-    """Restituisce l'istanza di Pose e gli strumenti di disegno."""
+    """Restituisce l'istanza di Pose e gli strumenti di disegno.
+
+    La configurazione scelta privilegia le prestazioni, sufficiente per
+    applicazioni di tracking in tempo reale.
+    """
 
     mp_pose = mp.solutions.pose
     mp_drawing = mp.solutions.drawing_utils
@@ -83,7 +105,12 @@ def setup_pose():
     return mp_pose, mp_drawing, pose
 
 def clamp_point(x: float, y: float, w: int, h: int) -> tuple[int, int]:
-    """Limita le coordinate normalizzate di MediaPipe ai bordi del frame."""
+    """Limita le coordinate normalizzate di MediaPipe ai bordi del frame.
+
+    MediaPipe restituisce i punti nel range ``[0, 1]`` rispetto alla dimensione
+    dell'immagine. Questa funzione converte tali valori in coordinate pixel e li
+    clampa per evitare accessi fuori dal buffer dell'immagine.
+    """
 
     # MediaPipe fornisce valori normalizzati tra 0 e 1. Qui li convertiamo in
     # coordinate pixel assicurandoci che rientrino nell'immagine per evitare
@@ -96,7 +123,13 @@ def clamp_point(x: float, y: float, w: int, h: int) -> tuple[int, int]:
 def compute_orientation(
     wrist_pt: np.ndarray, index_pt: np.ndarray, pinky_pt: np.ndarray
 ) -> tuple[float, float, float]:
-    """Calcola pitch, yaw e roll del piano della mano."""
+    """Calcola pitch, yaw e roll del piano della mano.
+
+    I tre punti forniti definiscono un sistema di riferimento per la mano:
+    ``wrist_pt`` è il centro, ``index_pt`` rappresenta la direzione del dito
+    indice e ``pinky_pt`` quella del mignolo. Attraverso il prodotto vettoriale
+    otteniamo gli assi ortogonali e deriviamo l'orientazione in gradi.
+    """
 
     x_axis = index_pt - wrist_pt
     y_axis = pinky_pt - wrist_pt
@@ -125,7 +158,12 @@ def compute_orientation(
 
 
 def init_plots():
-    """Inizializza le figure interattive per posizione e rotazione."""
+    """Inizializza le figure interattive per posizione e rotazione.
+
+    Vengono creati due grafici: il primo per la posizione X,Y,Z dei polsi e il
+    secondo per l'orientazione espressa in gradi. Le figure sono pensate per
+    essere aggiornate in tempo reale da un thread separato.
+    """
 
     plt.ion()
 
@@ -153,7 +191,19 @@ def init_plots():
 
 
 def update_plots(time_data, pos_data, rot_data, plots) -> None:
-    """Aggiorna le figure con i nuovi valori."""
+    """Aggiorna le figure con i nuovi valori.
+
+    Parametri
+    ----------
+    time_data : list[float]
+        Sequenza temporale dei campioni acquisiti.
+    pos_data : list[list[float]]
+        Coordinate X, Y e Z dei polsi.
+    rot_data : list[list[float]]
+        Angoli di pitch, yaw e roll associati.
+    plots : tuple
+        Struttura restituita da :func:`init_plots` contenente figure e linee.
+    """
 
     (fig_pos, ax_pos, pos_lines), (fig_rot, ax_rot, rot_lines) = plots
 
@@ -173,7 +223,11 @@ def update_plots(time_data, pos_data, rot_data, plots) -> None:
 
 
 def plot_worker(stop_event, lock, time_vals, pos_vals, rot_vals):
-    """Thread dedicato all'aggiornamento dei grafici."""
+    """Thread dedicato all'aggiornamento dei grafici.
+
+    Rimane in esecuzione finché ``stop_event`` non viene segnalato e aggiorna
+    periodicamente le figure leggendo i dati condivisi protetti dal ``lock``.
+    """
 
     plots = init_plots()
     while not stop_event.is_set():
@@ -186,7 +240,11 @@ def plot_worker(stop_event, lock, time_vals, pos_vals, rot_vals):
 
 
 def plot_results(csv_path: str) -> None:
-    """Legge il CSV e mostra grafici di posizione e rotazione."""
+    """Legge il CSV e mostra grafici di posizione e rotazione.
+
+    Questa funzione è utile per analizzare a posteriori i dati registrati su
+    disco, ricalcando i grafici mostrati in tempo reale durante l'acquisizione.
+    """
 
     df = pd.read_csv(csv_path)
 
@@ -226,7 +284,29 @@ def process_wrist(
     h: int,
     point_cloud: sl.Mat,
 ):
-    """Restituisce posizione 3D e orientamento del polso richiesto."""
+    """Restituisce posizione 3D e orientamento del polso richiesto.
+
+    Parametri
+    ----------
+    landmarks : list
+        Lista dei ``landmark`` di MediaPipe.
+    wrist_id : int
+        Indice del punto corrispondente al polso.
+    pinky_id : int
+        Indice del mignolo usato per definire l'asse laterale.
+    index_id : int
+        Indice del dito indice usato per definire l'asse longitudinale.
+    w, h : int
+        Dimensioni del frame in pixel.
+    point_cloud : sl.Mat
+        Cloud di punti ottenuta dalla ZED per ricavare la profondità.
+
+    Ritorna
+    -------
+    tuple
+        La posizione del polso, la tupla di rotazioni e le coordinate 2D nel
+        frame d'immagine.
+    """
 
     wrist = landmarks[wrist_id]
     pinky = landmarks[pinky_id]
@@ -245,7 +325,12 @@ def process_wrist(
 
 
 def main() -> None:
-    """Funzione principale dello script."""
+    """Funzione principale dello script.
+
+    Gestisce l'intero ciclo di acquisizione: inizializza dispositivi e moduli,
+    riceve i frame dalla ZED, calcola i landmark con MediaPipe e invia i dati
+    via UDP oltre a salvarli su CSV.
+    """
 
     parser = argparse.ArgumentParser(description="ZED wrist orientation tracker")
     parser.add_argument(

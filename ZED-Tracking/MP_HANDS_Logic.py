@@ -36,7 +36,20 @@ warnings.showwarning = _showwarning
 
 # --- Configurazione UDP -----------------------------------------------------
 def setup_udp(ip: str, port: int) -> socket.socket:
-    """Crea e restituisce un socket UDP pronto per l'invio."""
+    """Crea e restituisce un socket UDP pronto per l'invio.
+
+    Parametri
+    ----------
+    ip: str
+        Indirizzo IP di destinazione.
+    port: int
+        Porta di destinazione.
+
+    Ritorna
+    -------
+    socket.socket
+        Socket datagram configurato.
+    """
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     return sock
@@ -44,7 +57,11 @@ def setup_udp(ip: str, port: int) -> socket.socket:
 
 # --- Configurazione della ZED -----------------------------------------------
 def setup_zed():
-    """Inizializza la telecamera ZED e restituisce gli oggetti utili."""
+    """Inizializza la telecamera ZED e restituisce gli oggetti utili.
+
+    Configura la camera con parametri standard e ne verifica la corretta
+    apertura. In caso di fallimento solleva una ``RuntimeError``.
+    """
 
     zed = sl.Camera()
 
@@ -64,7 +81,11 @@ def setup_zed():
 
 # --- Configurazione di MediaPipe Hands --------------------------------------
 def setup_hands():
-    """Restituisce l'istanza di Hands e gli strumenti di disegno."""
+    """Restituisce l'istanza di Hands e gli strumenti di disegno.
+
+    L'istanza è configurata per elaborare stream video in tempo reale con un
+    massimo di due mani rilevate contemporaneamente.
+    """
 
     mp_hands = mp.solutions.hands
     mp_drawing = mp.solutions.drawing_utils
@@ -80,7 +101,11 @@ def setup_hands():
 
 
 def clamp_point(x: float, y: float, w: int, h: int) -> tuple[int, int]:
-    """Limita le coordinate normalizzate ai bordi del frame."""
+    """Limita le coordinate normalizzate ai bordi del frame.
+
+    Converte le coordinate ``x`` e ``y`` normalizzate in pixel e le limita alle
+    dimensioni reali dell'immagine evitando valori fuori range.
+    """
 
     px = int(np.clip(x * w, 0, w - 1))
     py = int(np.clip(y * h, 0, h - 1))
@@ -90,7 +115,11 @@ def clamp_point(x: float, y: float, w: int, h: int) -> tuple[int, int]:
 def compute_orientation(
     wrist_pt: np.ndarray, index_pt: np.ndarray, pinky_pt: np.ndarray
 ) -> tuple[float, float, float]:
-    """Calcola pitch, yaw e roll della mano."""
+    """Calcola pitch, yaw e roll della mano.
+
+    I tre punti definiscono un piccolo piano da cui ricavare l'orientazione
+    tramite algebra vettoriale. Il risultato è espresso in gradi.
+    """
 
     x_axis = index_pt - wrist_pt
     y_axis = pinky_pt - wrist_pt
@@ -119,7 +148,11 @@ def compute_orientation(
 
 
 def init_plots():
-    """Inizializza le figure interattive."""
+    """Inizializza le figure interattive.
+
+    Genera due finestre matplotlib che verranno riempite dinamicamente con i
+    valori di posizione e rotazione delle mani.
+    """
 
     plt.ion()
 
@@ -147,7 +180,11 @@ def init_plots():
 
 
 def update_plots(time_data, pos_data, rot_data, plots) -> None:
-    """Aggiorna i grafici interattivi."""
+    """Aggiorna i grafici interattivi.
+
+    Parametri corrispondono a quelli prodotti da :func:`init_plots` e vengono
+    usati per aggiornare le linee sui grafici in maniera incrementale.
+    """
 
     (fig_pos, ax_pos, pos_lines), (fig_rot, ax_rot, rot_lines) = plots
 
@@ -167,7 +204,11 @@ def update_plots(time_data, pos_data, rot_data, plots) -> None:
 
 
 def plot_worker(stop_event, lock, time_vals, pos_vals, rot_vals):
-    """Thread per l'aggiornamento continuo dei grafici."""
+    """Thread per l'aggiornamento continuo dei grafici.
+
+    Continua a eseguire ``update_plots`` finché ``stop_event`` non è settato.
+    L'accesso ai dati viene sincronizzato tramite ``lock``.
+    """
 
     plots = init_plots()
     while not stop_event.is_set():
@@ -180,7 +221,11 @@ def plot_worker(stop_event, lock, time_vals, pos_vals, rot_vals):
 
 
 def plot_results(csv_path: str) -> None:
-    """Legge il CSV e genera grafici delle posizioni e rotazioni."""
+    """Legge il CSV e genera grafici delle posizioni e rotazioni.
+
+    Utile per rivedere i movimenti registrati senza avviare nuovamente il
+    tracciamento.
+    """
 
     df = pd.read_csv(csv_path)
 
@@ -220,7 +265,11 @@ def process_hand(
     h: int,
     point_cloud: sl.Mat,
 ):
-    """Restituisce posizione 3D e orientamento della mano."""
+    """Restituisce posizione 3D e orientamento della mano.
+
+    Parametri e valore di ritorno sono analoghi a :func:`process_wrist` dello
+    script per il corpo, ma applicati alle mani rilevate da MediaPipe.
+    """
 
     wrist = landmarks[wrist_id]
     pinky = landmarks[pinky_id]
@@ -239,7 +288,11 @@ def process_hand(
 
 
 def main() -> None:
-    """Funzione principale dello script."""
+    """Funzione principale dello script.
+
+    Avvia tutti i componenti necessari al tracciamento delle mani e gestisce il
+    ciclo di acquisizione, serializzazione e invio dei dati.
+    """
 
     parser = argparse.ArgumentParser(
         description="ZED hand orientation tracker",
